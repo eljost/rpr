@@ -287,8 +287,6 @@ def precon_pos_orient(reactants, products):
         gm = r_means[m]
         rot_mat = get_rot_mat(gammas[m] - gm, alphas[m] - gm)
         rot_coords = (runion.coords3d[rfrag]- gm).dot(rot_mat)
-        # rot_coords += gm - rot_coords.mean(axis=0)
-        # runion.coords3d[rfrag] = rot_coords
         runion.coords3d[rfrag] = rot_coords + gm - rot_coords.mean(axis=0)
 
     with open("rstage3.trj", "w") as handle:
@@ -304,7 +302,6 @@ def precon_pos_orient(reactants, products):
     for m, pfrag in enumerate(pfrag_lists):
         pc3d = punion.coords3d[pfrag]
         gm = pc3d.mean(axis=0)
-        # r0Pm = pc3d - pc3d.mean(axis=0)[None, :]
         r0Pm = pc3d - gm[None, :]
         mu_Pm = np.zeros_like(r0Pm)
         N = Ns[m]
@@ -323,6 +320,12 @@ def precon_pos_orient(reactants, products):
 
     with open("pstage3.trj", "w") as handle:
         handle.write("\n".join((pstage3_pre_rot, punion.as_xyz(), products.as_xyz())))
+
+    ###############################
+    # STAGE 4                     #
+    #                             #
+    # Alignment of reactive atoms #
+    ###############################
 
 
 def run():
