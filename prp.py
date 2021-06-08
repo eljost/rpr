@@ -9,6 +9,7 @@ import numpy as np
 from pysisyphus.Geometry import Geometry
 from pysisyphus.helpers import geom_loader
 from pysisyphus.intcoords.setup import get_fragments, get_bond_sets
+from pysisyphus.xyzloader import coords_to_trj
 
 
 def precon(geom1, geom2, bonds_formed):
@@ -56,7 +57,28 @@ def get_molecular_radius(coords3d):
     return radius
 
 
-def precon(reactants, products):
+def get_rot_mat(coords3d_1, coords3d_2, center=False):
+    coords3d_1 = coords3d_1.copy().reshape(-1, 3)
+    coords3d_2 = coords3d_2.copy().reshape(-1, 3)
+
+    def _center(coords3d):
+        return coords3d - coords3d.mean(axis=0)
+
+    if center:
+        coords3d_1 = _center(coords3d_1)
+        coords3d_2 = _center(coords3d_2)
+
+    tmp_mat = coords3d_1.T.dot(coords3d_2)
+    U, W, Vt = np.linalg.svd(tmp_mat)
+    rot_mat = U.dot(Vt)
+    # Avoid reflections
+    if np.linalg.det(rot_mat) < 0:
+        U[:, -1] *= -1
+        rot_mat = U.dot(Vt)
+    return rot_mat
+
+
+def precon_pos_orient(reactants, products):
     rfrags, rfrag_bonds, rbonds, runion = get_fragments_and_bonds(reactants)
     pfrags, pfrag_bonds, pbonds, punion = get_fragments_and_bonds(products)
 
@@ -187,7 +209,9 @@ def precon(reactants, products):
     pradii = [get_molecular_radius(punion.coords3d[pfrag]) for pfrag in pfrag_lists]
     print(rradii, pradii)
 
-    def hard_sphere_opt(frag_lists, radii, coords3d, kappa_s21=1.0, max_cycles=50):
+    def hard_sphere_opt(
+        frag_lists, radii, coords3d, kappa_s21=1.0, max_cycles=50, trj_fn=None
+    ):
         coords3d = coords3d.copy()
         c3ds = list()
         for i in range(max_cycles):
@@ -226,16 +250,23 @@ def precon(reactants, products):
                     phi_mn = kappa_s21 / N_tot * (g_dist - h_sum)
                     f_tot += phi_mn * H * g_diff / g_dist
                     f_tot_str = np.array2string(f_tot, precision=3)
-                    print(f"{i:02d}: H={H}, N={N_tot}, phi={phi_mn:.4f}, f_tot={f_tot_str}")
+                    print(
+                        f"{i:02d}: H={H}, N={N_tot}, phi={phi_mn:.4f}, f_tot={f_tot_str}"
+                    )
                 coords3d[frag_m] -= f_tot[None, :]
-        from pysisyphus.xyzloader import coords_to_trj
-        # atoms = ["Q"] * coords3d.shape[0]
-        atoms = reactants.atoms
-        coords_list = c3ds
-        coords_to_trj("stage2_opt.trj", atoms, coords_list)
+
+        if trj_fn is not None:
+            atoms = reactants.atoms
+            coords_list = c3ds
+            coords_to_trj(trj_fn, atoms, coords_list)
         return coords3d
 
-    runion.coords3d = hard_sphere_opt(rfrag_lists, rradii, runion.coords3d)
+    runion.coords3d = hard_sphere_opt(
+        rfrag_lists, rradii, runion.coords3d, trj_fn="rstage2_opt.trj"
+    )
+    punion.coords3d = hard_sphere_opt(
+        pfrag_lists, pradii, punion.coords3d, trj_fn="pstage2_opt.trj"
+    )
 
     ####################################
     # STAGE 3                          #
@@ -243,22 +274,13 @@ def precon(reactants, products):
     # Initial orientation of molecules #
     ####################################
 
+    # Rotate R fragments
     alphas = get_steps_to_active_atom_mean(rfrag_lists, AR, runion.coords3d)
     gammas = np.zeros_like(alphas)
     for m, rfrag in enumerate(rfrag_lists):
         Gm = G[m]
         gammas[m] = runion.coords3d[Gm].mean(axis=0)
     r_means = np.array([runion.coords3d[frag].mean(axis=0) for frag in rfrag_lists])
-
-    def get_rot_mat(coords3d_1, coords3d_2):
-        tmp_mat = np.outer(coords3d_1, coords3d_2)
-        U, W, Vt = np.linalg.svd(tmp_mat)
-        rot_mat = U.dot(Vt)
-        # Avoid reflections
-        if np.linalg.det(rot_mat) < 0:
-            U[:, -1] *= -1
-            rot_mat = U.dot(Vt)
-        return rot_mat
 
     rstage3_pre_rot = runion.as_xyz()
     for m, rfrag in enumerate(rfrag_lists):
@@ -269,6 +291,33 @@ def precon(reactants, products):
     with open("rstage3.trj", "w") as handle:
         handle.write("\n".join((rstage3_pre_rot, runion.as_xyz(), products.as_xyz())))
 
+    Ns = [0] * len(pfrag_lists)
+    for (m, n), CPmn in CP.items():
+        Ns[m] += len(CPmn)
+    Ns2_tot = sum([N ** 2 for N in Ns])
+
+    pstage3_pre_rot = punion.as_xyz()
+    # Rotate P fragments
+    for m, pfrag in enumerate(pfrag_lists):
+        pc3d = punion.coords3d[pfrag]
+        r0Pm = pc3d - pc3d.mean(axis=0)[None, :]
+        mu_Pm = np.zeros_like(r0Pm)
+        N = Ns[m]
+        for n, rfrag in enumerate(rfrag_lists):
+            CPmn = CP[(m, n)]
+            RPmRn = get_rot_mat(
+                punion.coords3d[CPmn], runion.coords3d[CPmn], center=True
+            )
+            print(f"m={m}, n={n}, len(CPmn)={len(CPmn)}, rot_mat={rot_mat.shape}")
+            # Eq. (A2) in [1]
+            r0Pmn = np.einsum("ij,jk->ki", RPmRn, r0Pm.T)
+            mu_Pm += len(CPmn) ** 2 / N * r0Pmn
+        rot_mat = get_rot_mat(r0Pm, mu_Pm, center=True)
+        punion.coords3d[pfrag] = punion.coords3d[pfrag].dot(rot_mat)
+
+    with open("pstage3.trj", "w") as handle:
+        handle.write("\n".join((pstage3_pre_rot, punion.as_xyz(), products.as_xyz())))
+
 
 def run():
     # Patch covalent radii, so we can fome some bonds
@@ -277,9 +326,10 @@ def run():
     CR["q"] = 1.5
     # educt, ts, product = geom_loader("00_c2no2.trj")
     # educt, product = geom_loader("test.trj")
-    # educt, product = geom_loader("figure1.trj")
-    educt, product = geom_loader("fig2.trj")
-    precon(educt, product)
+    educt, product = geom_loader("figure1.trj")
+    # educt, product = geom_loader("fig2.trj")
+    # educt, product = geom_loader("fig2_mod.trj")
+    precon_pos_orient(educt, product)
 
 
 if __name__ == "__main__":
