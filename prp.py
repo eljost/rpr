@@ -284,9 +284,12 @@ def precon_pos_orient(reactants, products):
 
     rstage3_pre_rot = runion.as_xyz()
     for m, rfrag in enumerate(rfrag_lists):
-        mean = r_means[m]
-        rot_mat = get_rot_mat(gammas[m] - mean, alphas[m] - mean)
-        runion.coords3d[rfrag] = runion.coords3d[rfrag].dot(rot_mat)
+        gm = r_means[m]
+        rot_mat = get_rot_mat(gammas[m] - gm, alphas[m] - gm)
+        rot_coords = (runion.coords3d[rfrag]- gm).dot(rot_mat)
+        # rot_coords += gm - rot_coords.mean(axis=0)
+        # runion.coords3d[rfrag] = rot_coords
+        runion.coords3d[rfrag] = rot_coords + gm - rot_coords.mean(axis=0)
 
     with open("rstage3.trj", "w") as handle:
         handle.write("\n".join((rstage3_pre_rot, runion.as_xyz(), products.as_xyz())))
@@ -300,7 +303,9 @@ def precon_pos_orient(reactants, products):
     # Rotate P fragments
     for m, pfrag in enumerate(pfrag_lists):
         pc3d = punion.coords3d[pfrag]
-        r0Pm = pc3d - pc3d.mean(axis=0)[None, :]
+        gm = pc3d.mean(axis=0)
+        # r0Pm = pc3d - pc3d.mean(axis=0)[None, :]
+        r0Pm = pc3d - gm[None, :]
         mu_Pm = np.zeros_like(r0Pm)
         N = Ns[m]
         for n, rfrag in enumerate(rfrag_lists):
@@ -313,7 +318,8 @@ def precon_pos_orient(reactants, products):
             r0Pmn = np.einsum("ij,jk->ki", RPmRn, r0Pm.T)
             mu_Pm += len(CPmn) ** 2 / N * r0Pmn
         rot_mat = get_rot_mat(r0Pm, mu_Pm, center=True)
-        punion.coords3d[pfrag] = punion.coords3d[pfrag].dot(rot_mat)
+        rot_coords = r0Pm.dot(rot_mat)
+        punion.coords3d[pfrag] = rot_coords + gm - rot_coords.mean(axis=0)
 
     with open("pstage3.trj", "w") as handle:
         handle.write("\n".join((pstage3_pre_rot, punion.as_xyz(), products.as_xyz())))
@@ -326,9 +332,9 @@ def run():
     CR["q"] = 1.5
     # educt, ts, product = geom_loader("00_c2no2.trj")
     # educt, product = geom_loader("test.trj")
-    educt, product = geom_loader("figure1.trj")
+    # educt, product = geom_loader("figure1.trj")
     # educt, product = geom_loader("fig2.trj")
-    # educt, product = geom_loader("fig2_mod.trj")
+    educt, product = geom_loader("fig2_mod.trj")
     precon_pos_orient(educt, product)
 
 
