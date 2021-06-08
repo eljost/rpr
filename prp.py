@@ -78,6 +78,37 @@ def get_rot_mat(coords3d_1, coords3d_2, center=False):
     return rot_mat
 
 
+def get_trans_rot_vecs(coords3d, A, m, frag_lists, kappa=1):
+    mfrag = frag_lists[m]
+    mcoords3d = coords3d[mfrag]
+    gm = mcoords3d.mean(axis=0)
+
+    vt = np.zeros(3)
+    vr = np.zeros(3)
+    N = 0
+    for n, nfrag in enumerate(frag_lists):
+        if m == n:
+            continue
+        Amn = A[(m, n)]
+        Anm = A[(n, m)]
+        N += len(Amn) + len(Anm)
+        for a in Amn:
+            for b in Anm:
+                rd = coords3d[b] - coords3d[a]
+                gd = coords3d[a] - gm
+
+                vt += abs(rd.dot(gd)) * rd / np.linalg.norm(rd)
+                vr += np.cross(rd, gd)
+
+    N *= 3 * len(mfrag)
+    N_inv = 1 / N
+    vt *= N_inv
+    vr *= N_inv
+
+    forces = kappa * (np.cross(-vr, mcoords3d-gm) + vt[None, :])
+    return forces
+
+
 def precon_pos_orient(reactants, products):
     rfrags, rfrag_bonds, rbonds, runion = get_fragments_and_bonds(reactants)
     pfrags, pfrag_bonds, pbonds, punion = get_fragments_and_bonds(products)
@@ -286,7 +317,7 @@ def precon_pos_orient(reactants, products):
     for m, rfrag in enumerate(rfrag_lists):
         gm = r_means[m]
         rot_mat = get_rot_mat(gammas[m] - gm, alphas[m] - gm)
-        rot_coords = (runion.coords3d[rfrag]- gm).dot(rot_mat)
+        rot_coords = (runion.coords3d[rfrag] - gm).dot(rot_mat)
         runion.coords3d[rfrag] = rot_coords + gm - rot_coords.mean(axis=0)
 
     with open("rstage3.trj", "w") as handle:
@@ -326,6 +357,8 @@ def precon_pos_orient(reactants, products):
     #                             #
     # Alignment of reactive atoms #
     ###############################
+
+    forces = get_trans_rot_vecs(runion.coords3d, AR, 0, rfrag_lists)
 
 
 def run():
