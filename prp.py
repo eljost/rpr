@@ -2,7 +2,6 @@
 #     Habershon, 2021
 
 from functools import reduce
-import itertools as it
 
 import numpy as np
 
@@ -158,8 +157,6 @@ def precon_pos_orient(reactants, products):
 
     rfrag_lists = [list(frag) for frag in rfrags]
     pfrag_lists = [list(frag) for frag in pfrags]
-    rfrag_num = len(rfrags)
-    pfrag_num = len(pfrags)
 
     pbond_diff = pbonds - rbonds  # Present in product(s)
     rbond_diff = rbonds - pbonds  # Present in reactant(s)
@@ -312,10 +309,9 @@ def precon_pos_orient(reactants, products):
     Ns = [0] * len(pfrag_lists)
     for (m, n), CPmn in CP.items():
         Ns[m] += len(CPmn)
-    Ns2_tot = sum([N ** 2 for N in Ns])
 
-    pstage3_pre_rot = punion.as_xyz()
     # Rotate P fragments
+    pstage3_pre_rot = punion.as_xyz()
     for m, pfrag in enumerate(pfrag_lists):
         pc3d = punion.coords3d[pfrag]
         gm = pc3d.mean(axis=0)
