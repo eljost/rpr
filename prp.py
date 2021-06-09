@@ -136,18 +136,35 @@ def get_trans_rot_vecs2(
     return forces
 
 
-def sd_opt(geom, forces_getter, max_cycles=500, max_step=0.25, rms_thresh=0.005):
+def sd_opt(geom, forces_getter, max_cycles=1000, max_step=0.05, rms_thresh=0.05):
     coords = geom.coords.copy()
+    # all_coords = np.zeros((max_cycles, coords.size))
+
     for i in range(max_cycles):
+        # all_coords[i] = coords.copy()
         forces = forces_getter(coords)
         norm = np.linalg.norm(forces)
-        if norm <= rms_thresh:
+        rms = np.sqrt(np.mean(forces ** 2))
+        # if rms <= rms_thresh:
+            # print(f"Converged in cycle {i}. Breaking.")
+            # break
+        if norm <= 0.5:
             print("Converged")
             break
-        step = forces
-        step *= min(max_step / np.abs(step).max(), 1)
+        step = forces.copy()
+        if np.linalg.norm(step) > 0.2:
+            step = 0.2 * step / np.linalg.norm(step)
+        # step *= min(max_step / np.abs(step).max(), 1)
+        # if i % 25 == 0:
+        if True:#i % 25 == 0:
+            print(
+                f"{i:03d}: |forces|={norm: >12.6f} rms(forces)={np.sqrt(np.mean(forces**2)): >12.6f} "
+                f"|step|={np.linalg.norm(step): >12.6f}"
+            )
         coords += step
-    return coords
+
+    # return coords, all_coords
+    return coords, None
 
 
 def precon_pos_orient(reactants, products):
@@ -370,21 +387,18 @@ def precon_pos_orient(reactants, products):
         except KeyError:
             return 0.5
 
-    s4_coords = list()
     rhs_calc = HardSphereCalculator(runion, rfrag_lists, kappa=50)
-    # def r_forces_getter(coords):
-    for i in range(500):
-        s4_coords.append(runion.coords3d.copy())
+
+    def r_forces_getter(coords):
         forces = np.zeros_like(runion.coords3d)
         for m, mfrag in enumerate(rfrag_lists):
-            # forces = get_trans_rot_vecs(runion.coords3d, AR, m, rfrag_lists)
+            coords3d = coords.reshape(-1, 3)
             v_forces = get_trans_rot_vecs2(
-                mfrag, runion.coords3d, runion.coords3d, AR, AR, m, rfrag_lists
+                mfrag, coords3d, coords3d, AR, AR, m, rfrag_lists
             )
-            # np.testing.assert_allclose(v_forces, forces)
             w_forces = get_trans_rot_vecs2(
                 mfrag,
-                runion.coords3d,
+                coords3d,
                 punion.coords3d,
                 CR,
                 CP,
@@ -393,27 +407,13 @@ def precon_pos_orient(reactants, products):
                 weight_func=weight_func,
                 skip=False,
             )
-            hs_res = rhs_calc.get_forces(runion.atoms, runion.coords)
-            # import pdb; pdb.set_trace()
+            hs_res = rhs_calc.get_forces(runion.atoms, coords)
             hs_forces = hs_res["forces"].reshape(-1, 3)
-            # print(f"norm(w_forces)={np.linalg.norm(w_forces):.4f}")
             forces[mfrag] = v_forces + w_forces + hs_forces[mfrag]
-            # forces[mfrag] = v_forces + w_forces# + hs_forces[mfrag]
-        step = forces
-        norm = np.linalg.norm(step)
-        if norm < 0.5:
-            print("Converged")
-            break
-        max_step = 0.2
-        if norm > max_step:
-            step = max_step * step / norm
-        new_coords3d = runion.coords3d + step
-        print(f"{i:02d}: norm={norm:.4f}")
-        runion.coords3d = new_coords3d
+        return forces.flatten()
 
-    atoms = runion.atoms
-    coords_list = s4_coords
-    coords_to_trj("rs4.trj", atoms, coords_list)
+    runion.coords, _ = sd_opt(runion, r_forces_getter)
+    coords_to_trj("rs4.trj", runion.atoms, _)
 
 
 def run():
