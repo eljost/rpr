@@ -373,7 +373,7 @@ def precon_pos_orient(reactants, products):
     forces.
     """
 
-    def weight_func(m, n, a, b):
+    def r_weight_func(m, n, a, b):
         """As required for (A5) in [1]."""
         try:
             return 1 if a in BR[(m, n)] else 0.5
@@ -397,7 +397,7 @@ def precon_pos_orient(reactants, products):
                 CP,
                 m,
                 pfrag_lists,
-                weight_func=weight_func,
+                weight_func=r_weight_func,
                 skip=False,
             )
             hs_res = rhs_calc.get_forces(runion.atoms, coords)
@@ -405,8 +405,45 @@ def precon_pos_orient(reactants, products):
             forces[mfrag] = v_forces + w_forces + hs_forces[mfrag]
         return forces.flatten()
 
+
     runion.coords, _ = sd_opt(runion, r_forces_getter)
     coords_to_trj("rs4.trj", runion.atoms, _)
+
+    def p_weight_func(m, n, a, b):
+        """As required for (A5) in [1]."""
+        try:
+            return 1 if a in BP[(m, n)] else 0.5
+        except KeyError:
+            return 0.5
+
+    phs_calc = HardSphereCalculator(punion, pfrag_lists, kappa=50)
+
+    def p_forces_getter(coords):
+        forces = np.zeros_like(punion.coords3d)
+        for m, mfrag in enumerate(pfrag_lists):
+            coords3d = coords.reshape(-1, 3)
+            v_forces = get_trans_rot_vecs2(
+                mfrag, coords3d, coords3d, AP, AP, m, pfrag_lists
+            )
+            w_forces = get_trans_rot_vecs2(
+                mfrag,
+                coords3d,
+                runion.coords3d,
+                CP,
+                CR,
+                m,
+                rfrag_lists,
+                weight_func=p_weight_func,
+                skip=False,
+            )
+            # w_forces = np.zeros_like(v_forces)
+            hs_res = phs_calc.get_forces(punion.atoms, coords)
+            hs_forces = hs_res["forces"].reshape(-1, 3)
+            forces[mfrag] = v_forces + w_forces + hs_forces[mfrag]
+        return forces.flatten()
+
+    punion.coords, _ = sd_opt(punion, p_forces_getter)
+    coords_to_trj("ps4.trj", punion.atoms, _)
 
 
 def run():
