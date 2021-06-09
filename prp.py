@@ -5,7 +5,7 @@ from functools import reduce
 
 import numpy as np
 
-from pysisyphus.calculators import HardSphereCalculator
+from pysisyphus.calculators import HardSphere, TransTorque, Composite
 from pysisyphus.Geometry import Geometry
 from pysisyphus.helpers import geom_loader
 from pysisyphus.intcoords.setup import get_fragments, get_bond_sets
@@ -157,7 +157,7 @@ def sd_opt(geom, forces_getter, max_cycles=1000, max_step=0.05, rms_thresh=0.05)
             )
         coords += step
 
-    return coords, all_coords[:i+1]
+    return coords, all_coords[: i + 1]
 
 
 def precon_pos_orient(reactants, products):
@@ -288,9 +288,9 @@ def precon_pos_orient(reactants, products):
     # Intra-image Inter-molecular Hard-Sphere forces #
     ##################################################
 
-    def hard_sphere_opt(geom, frag_lists, prefix):
+    def stage1_hard_sphere_opt(geom, frag_lists, prefix):
         geom_ = geom.copy()
-        calc = HardSphereCalculator(geom_, frag_lists)
+        calc = HardSphere(geom_, frag_lists)
         geom_.set_calculator(calc)
         opt_kwargs = {
             "max_cycles": 500,
@@ -303,8 +303,8 @@ def precon_pos_orient(reactants, products):
 
         return geom_.coords3d
 
-    runion.coords3d = hard_sphere_opt(runion, rfrag_lists, "R")
-    punion.coords3d = hard_sphere_opt(punion, pfrag_lists, "P")
+    runion.coords3d = stage1_hard_sphere_opt(runion, rfrag_lists, "R")
+    punion.coords3d = stage1_hard_sphere_opt(punion, pfrag_lists, "P")
 
     ####################################
     # STAGE 3                          #
@@ -373,6 +373,18 @@ def precon_pos_orient(reactants, products):
     forces.
     """
 
+    def stage4_opt(geom, keys_calcs):
+        calc = Composite("hardsphere + v + w", keys_calcs=keys_calcs)
+        geom.set_calculator(calc)
+        opt_kwargs = {
+            "max_step": 0.05,
+            "max_cycles": 1000,
+            "rms_force": 0.05,
+            "rms_force_only": True,
+        }
+        opt = SteepestDescent(geom, **opt_kwargs)
+        opt.run()
+
     def r_weight_func(m, n, a, b):
         """As required for (A5) in [1]."""
         try:
@@ -380,34 +392,22 @@ def precon_pos_orient(reactants, products):
         except KeyError:
             return 0.5
 
-    rhs_calc = HardSphereCalculator(runion, rfrag_lists, kappa=50)
-
-    def r_forces_getter(coords):
-        forces = np.zeros_like(runion.coords3d)
-        for m, mfrag in enumerate(rfrag_lists):
-            coords3d = coords.reshape(-1, 3)
-            v_forces = get_trans_rot_vecs2(
-                mfrag, coords3d, coords3d, AR, AR, m, rfrag_lists
-            )
-            w_forces = get_trans_rot_vecs2(
-                mfrag,
-                coords3d,
-                punion.coords3d,
-                CR,
-                CP,
-                m,
-                pfrag_lists,
-                weight_func=r_weight_func,
-                skip=False,
-            )
-            hs_res = rhs_calc.get_forces(runion.atoms, coords)
-            hs_forces = hs_res["forces"].reshape(-1, 3)
-            forces[mfrag] = v_forces + w_forces + hs_forces[mfrag]
-        return forces.flatten()
-
-
-    runion.coords, _ = sd_opt(runion, r_forces_getter)
-    coords_to_trj("rs4.trj", runion.atoms, _)
+    vr_trans_torque = TransTorque(rfrag_lists, rfrag_lists, AR, AR)
+    wr_trans_torque = TransTorque(
+        rfrag_lists,
+        pfrag_lists,
+        CR,
+        CP,
+        weight_func=r_weight_func,
+        skip=False,
+        b_coords3d=punion.coords3d,
+    )
+    r_keys_calcs = {
+        "hardsphere": HardSphere(runion, rfrag_lists, kappa=50),
+        "v": vr_trans_torque,
+        "w": wr_trans_torque,
+    }
+    stage4_opt(runion, r_keys_calcs)
 
     def p_weight_func(m, n, a, b):
         """As required for (A5) in [1]."""
@@ -416,7 +416,25 @@ def precon_pos_orient(reactants, products):
         except KeyError:
             return 0.5
 
-    phs_calc = HardSphereCalculator(punion, pfrag_lists, kappa=50)
+    vp_trans_torque = TransTorque(pfrag_lists, pfrag_lists, AP, AP)
+    wp_trans_torque = TransTorque(
+        pfrag_lists,
+        rfrag_lists,
+        CP,
+        CR,
+        weight_func=p_weight_func,
+        skip=False,
+        b_coords3d=runion.coords3d,
+    )
+    p_keys_calcs = {
+        "hardsphere": HardSphere(punion, pfrag_lists, kappa=50),
+        "v": vp_trans_torque,
+        "w": wp_trans_torque,
+    }
+    stage4_opt(punion, p_keys_calcs)
+    with open("pu_new.xyz", "w") as handle:
+        handle.write(punion.as_xyz())
+    import sys; sys.exit()
 
     def p_forces_getter(coords):
         forces = np.zeros_like(punion.coords3d)
@@ -443,7 +461,14 @@ def precon_pos_orient(reactants, products):
         return forces.flatten()
 
     punion.coords, _ = sd_opt(punion, p_forces_getter)
+    with open("pu_ref.xyz", "w") as handle:
+        handle.write(punion.as_xyz())
     coords_to_trj("ps4.trj", punion.atoms, _)
+
+    """
+    STAGE 5
+    Refinement of atomic positions using further hard-sphere forces.
+    """
 
 
 def run():
