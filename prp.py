@@ -136,6 +136,20 @@ def get_trans_rot_vecs2(
     return forces
 
 
+def sd_opt(geom, forces_getter, max_cycles=500, max_step=0.25, rms_thresh=0.005):
+    coords = geom.coords.copy()
+    for i in range(max_cycles):
+        forces = forces_getter(coords)
+        norm = np.linalg.norm(forces)
+        if norm <= rms_thresh:
+            print("Converged")
+            break
+        step = forces
+        step *= min(max_step / np.abs(step).max(), 1)
+        coords += step
+    return coords
+
+
 def precon_pos_orient(reactants, products):
     rfrags, rfrag_bonds, rbonds, runion = get_fragments_and_bonds(reactants)
     pfrags, pfrag_bonds, pbonds, punion = get_fragments_and_bonds(products)
@@ -334,23 +348,32 @@ def precon_pos_orient(reactants, products):
     with open("pstage3.trj", "w") as handle:
         handle.write("\n".join((pstage3_pre_rot, punion.as_xyz(), products.as_xyz())))
 
-    ###############################
-    # STAGE 4                     #
-    #                             #
-    # Alignment of reactive atoms #
-    ###############################
+    """
+    STAGE 4
+    Alignment of reactive atoms
+
+
+    This stage involves three forces: hard-sphere forces and two kinds
+    of average translational (^t) and rotational (^r) forces (v and w,
+    (A3) - (A5) in [1]).
+
+    v^t and v^r arise from atoms in A^Rnm and A^Rmn, that is atoms that
+    participate in bond forming/breaking in R. The translational force
+    is usually attractive, which is counteracted by the repulsive hard-sphere
+    forces.
+    """
 
     def weight_func(m, n, a, b):
+        """As required for (A5) in [1]."""
         try:
             return 1 if a in BR[(m, n)] else 0.5
         except KeyError:
             return 0.5
 
     s4_coords = list()
-    # rhs_calc = HardSphereCalculator(runion, rfrag_lists, kappa=50.0)
     rhs_calc = HardSphereCalculator(runion, rfrag_lists, kappa=50)
+    # def r_forces_getter(coords):
     for i in range(500):
-        # s4_coords = [runion.coords3d.copy(), ]
         s4_coords.append(runion.coords3d.copy())
         forces = np.zeros_like(runion.coords3d)
         for m, mfrag in enumerate(rfrag_lists):
