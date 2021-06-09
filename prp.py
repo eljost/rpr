@@ -223,9 +223,11 @@ def precon_pos_orient(reactants, products):
 
     G = form_G(rfrags, AR)
 
-    ###########
-    # STAGE 1 #
-    ###########
+    #########################################################
+    # STAGE 1                                               #
+    #                                                       #
+    # Initial positioning of reactant and product molecules #
+    #########################################################
 
     # Center fragments at their geometric average
     center_fragments(rfrag_lists, runion)
@@ -259,10 +261,11 @@ def precon_pos_orient(reactants, products):
     for pfrag, bsh in zip(pfrag_lists, bs_half):
         punion.coords3d[pfrag] += bsh
 
-    ###########
-    # STAGE 2 #
-    ###########
-
+    ##################################################
+    # STAGE 2                                        #
+    #                                                #
+    # Intra-image Inter-molecular Hard-Sphere forces #
+    ##################################################
 
     def hard_sphere_opt(geom, frag_lists, prefix):
         geom_ = geom.copy()
@@ -348,7 +351,9 @@ def precon_pos_orient(reactants, products):
             return 0.5
 
     s4_coords = list()
-    for i in range(10):
+    # rhs_calc = HardSphereCalculator(runion, rfrag_lists, kappa=50.0)
+    rhs_calc = HardSphereCalculator(runion, rfrag_lists, kappa=50)
+    for i in range(500):
         # s4_coords = [runion.coords3d.copy(), ]
         s4_coords.append(runion.coords3d.copy())
         forces = np.zeros_like(runion.coords3d)
@@ -369,14 +374,23 @@ def precon_pos_orient(reactants, products):
                 weight_func=weight_func,
                 skip=False,
             )
-            # w_forces = np.zeros_like(w_forces)
-            print(f"norm(w_forces)={np.linalg.norm(w_forces):.4f}")
-            forces[mfrag] = v_forces + w_forces
-        norm = np.linalg.norm(forces)
+            hs_res = rhs_calc.get_forces(runion.atoms, runion.coords)
+            # import pdb; pdb.set_trace()
+            hs_forces = hs_res["forces"].reshape(-1, 3)
+            # print(f"norm(w_forces)={np.linalg.norm(w_forces):.4f}")
+            forces[mfrag] = v_forces + w_forces + hs_forces[mfrag]
+            # forces[mfrag] = v_forces + w_forces# + hs_forces[mfrag]
         step = forces
+        norm = np.linalg.norm(step)
+        if norm < 0.5:
+            print("Converged")
+            break
+        max_step = 0.2
+        if norm > max_step:
+            step = max_step * step / norm
         new_coords3d = runion.coords3d + step
         print(f"{i:02d}: norm={norm:.4f}")
-        runion.coords3d =  new_coords3d
+        runion.coords3d = new_coords3d
 
     atoms = runion.atoms
     coords_list = s4_coords
