@@ -138,33 +138,26 @@ def get_trans_rot_vecs2(
 
 def sd_opt(geom, forces_getter, max_cycles=1000, max_step=0.05, rms_thresh=0.05):
     coords = geom.coords.copy()
-    # all_coords = np.zeros((max_cycles, coords.size))
+    all_coords = np.zeros((max_cycles, coords.size))
 
     for i in range(max_cycles):
-        # all_coords[i] = coords.copy()
+        all_coords[i] = coords.copy()
         forces = forces_getter(coords)
         norm = np.linalg.norm(forces)
         rms = np.sqrt(np.mean(forces ** 2))
-        # if rms <= rms_thresh:
-            # print(f"Converged in cycle {i}. Breaking.")
-            # break
-        if norm <= 0.5:
-            print("Converged")
+        if rms <= rms_thresh:
+            print(f"Converged in cycle {i}. Breaking.")
             break
         step = forces.copy()
-        if np.linalg.norm(step) > 0.2:
-            step = 0.2 * step / np.linalg.norm(step)
-        # step *= min(max_step / np.abs(step).max(), 1)
-        # if i % 25 == 0:
-        if True:#i % 25 == 0:
+        step *= min(max_step / np.abs(step).max(), 1)
+        if i % 25 == 0:
             print(
                 f"{i:03d}: |forces|={norm: >12.6f} rms(forces)={np.sqrt(np.mean(forces**2)): >12.6f} "
                 f"|step|={np.linalg.norm(step): >12.6f}"
             )
         coords += step
 
-    # return coords, all_coords
-    return coords, None
+    return coords, all_coords[:i+1]
 
 
 def precon_pos_orient(reactants, products):
