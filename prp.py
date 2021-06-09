@@ -6,21 +6,12 @@ import itertools as it
 
 import numpy as np
 
+from pysisyphus.calculators import HardSphereCalculator
 from pysisyphus.Geometry import Geometry
 from pysisyphus.helpers import geom_loader
 from pysisyphus.intcoords.setup import get_fragments, get_bond_sets
 from pysisyphus.xyzloader import coords_to_trj
-
-
-def precon(geom1, geom2, bonds_formed):
-    # Place reactants at origin
-    geom1.coords3d -= geom1.centroid[None, :]
-    geom2.coords3d -= geom2.centroid[None, :]
-    print("geom1.centroid", geom1.centroid)
-    print("geom2.centroid", geom2.centroid)
-
-    union = geom1 + geom2
-    # union.jmol()
+from pysisyphus.optimizers.SteepestDescent import SteepestDescent
 
 
 def get_fragments_and_bonds(geoms):
@@ -45,16 +36,6 @@ def get_fragments_and_bonds(geoms):
 
     # return fragments, frag_bonds, set(bonds), frag_atoms
     return fragments, frag_bonds, set(bonds), union_geom
-
-
-def get_molecular_radius(coords3d):
-    coords3d = coords3d.copy()
-    mean = coords3d.mean(axis=0)
-    coords3d -= mean[None, :]
-    distances = np.linalg.norm(coords3d, axis=1)
-    std = max(0.9452, np.std(distances))  # at least 2 angstrom apart
-    radius = distances.mean() + 2 * std
-    return radius
 
 
 def get_rot_mat(coords3d_1, coords3d_2, center=False):
@@ -105,7 +86,54 @@ def get_trans_rot_vecs(coords3d, A, m, frag_lists, kappa=1):
     vt *= N_inv
     vr *= N_inv
 
-    forces = kappa * (np.cross(-vr, mcoords3d-gm) + vt[None, :])
+    forces = kappa * (np.cross(-vr, mcoords3d - gm) + vt[None, :])
+    return forces
+
+
+def get_trans_rot_vecs2(
+    mfrag,
+    a_coords3d,
+    b_coords3d,
+    a_mats,
+    b_mats,
+    m,
+    frag_lists,
+    weight_func=None,
+    skip=True,
+    kappa=1,
+):
+    mcoords3d = a_coords3d[mfrag]
+    gm = mcoords3d.mean(axis=0)
+
+    if weight_func is None:
+
+        def weight_func(m, n, a, b):
+            return 1
+
+    trans_vec = np.zeros(3)
+    rot_vec = np.zeros(3)
+    N = 0
+    for n, nfrag in enumerate(frag_lists):
+        if skip and (m == n):
+            continue
+        amn = a_mats[(m, n)]
+        bnm = b_mats[(n, m)]
+        N += len(amn) * len(bnm)
+        for a in amn:
+            for b in bnm:
+                rd = b_coords3d[b] - a_coords3d[a]
+                gd = a_coords3d[a] - gm
+                weight = weight_func(a, b, m, n)
+
+                trans_vec += weight * abs(rd.dot(gd)) * rd / np.linalg.norm(rd)
+                rot_vec += weight * np.cross(rd, gd)
+
+    N *= 3 * len(mfrag)
+    N_inv = 1 / N
+    trans_vec *= N_inv
+    rot_vec *= N_inv
+
+    forces = kappa * (np.cross(-rot_vec, mcoords3d - gm) + trans_vec[None, :])
     return forces
 
 
@@ -235,69 +263,24 @@ def precon_pos_orient(reactants, products):
     # STAGE 2 #
     ###########
 
-    # Estimate fragment radii
-    rradii = [get_molecular_radius(runion.coords3d[rfrag]) for rfrag in rfrag_lists]
-    pradii = [get_molecular_radius(punion.coords3d[pfrag]) for pfrag in pfrag_lists]
-    print(rradii, pradii)
 
-    def hard_sphere_opt(
-        frag_lists, radii, coords3d, kappa_s21=1.0, max_cycles=50, trj_fn=None
-    ):
-        coords3d = coords3d.copy()
-        c3ds = list()
-        for i in range(max_cycles):
-            c3ds.append(coords3d.copy())
-            for m, frag_m in enumerate(frag_lists):
-                M_m = len(frag_m)
-                h_m = radii[m]
-                g_m = coords3d[frag_m].mean(axis=0)
-                N_tot = 0.0
-                Hs = list()
-                for n, _ in enumerate(frag_lists):
-                    if m == n:
-                        continue
-                    frag_n = frag_lists[n]
-                    M_n = len(frag_n)
-                    h_n = radii[n]
-                    h_sum = h_m + h_n
-                    g_n = coords3d[frag_n].mean(axis=0)
-                    g_diff = g_m - g_n
-                    g_dist = np.linalg.norm(g_diff)
-                    H = 1 if g_dist <= h_sum else 0
-                    Hs.append(H)
-                    N_tot += 3 * M_m * H
+    def hard_sphere_opt(geom, frag_lists, prefix):
+        geom_ = geom.copy()
+        calc = HardSphereCalculator(geom_, frag_lists)
+        geom_.set_calculator(calc)
+        opt_kwargs = {
+            "max_cycles": 500,
+            "max_step": 0.5,
+            # "dump": True,
+            "prefix": prefix,
+        }
+        opt = SteepestDescent(geom_, **opt_kwargs)
+        opt.run()
 
-                f_tot = np.zeros(3)
-                for n, _ in enumerate(frag_lists):
-                    if m == n:
-                        continue
-                    H = Hs.pop(0)
-                    h_n = radii[n]
-                    h_sum = h_m + h_n
-                    g_n = coords3d[frag_n].mean(axis=0)
-                    g_diff = g_m - g_n
-                    g_dist = np.linalg.norm(g_diff)
+        return geom_.coords3d
 
-                    phi_mn = kappa_s21 / N_tot * (g_dist - h_sum)
-                    f_tot += phi_mn * H * g_diff / g_dist
-                    f_tot_str = np.array2string(f_tot, precision=3)
-                    print(
-                        f"{i:02d}: H={H}, N={N_tot}, phi={phi_mn:.4f}, f_tot={f_tot_str}"
-                    )
-                coords3d[frag_m] -= f_tot[None, :]
-
-        if trj_fn is not None:
-            atoms = reactants.atoms
-            coords_list = c3ds
-            coords_to_trj(trj_fn, atoms, coords_list)
-        return coords3d
-
-    runion.coords3d = hard_sphere_opt(
-        rfrag_lists, rradii, runion.coords3d, trj_fn="rstage2_opt.trj"
-    )
-    punion.coords3d = hard_sphere_opt(
-        pfrag_lists, pradii, punion.coords3d, trj_fn="pstage2_opt.trj"
-    )
+    runion.coords3d = hard_sphere_opt(runion, rfrag_lists, "R")
+    punion.coords3d = hard_sphere_opt(punion, pfrag_lists, "P")
 
     ####################################
     # STAGE 3                          #
@@ -358,7 +341,46 @@ def precon_pos_orient(reactants, products):
     # Alignment of reactive atoms #
     ###############################
 
-    forces = get_trans_rot_vecs(runion.coords3d, AR, 0, rfrag_lists)
+    def weight_func(m, n, a, b):
+        try:
+            return 1 if a in BR[(m, n)] else 0.5
+        except KeyError:
+            return 0.5
+
+    s4_coords = list()
+    for i in range(10):
+        # s4_coords = [runion.coords3d.copy(), ]
+        s4_coords.append(runion.coords3d.copy())
+        forces = np.zeros_like(runion.coords3d)
+        for m, mfrag in enumerate(rfrag_lists):
+            # forces = get_trans_rot_vecs(runion.coords3d, AR, m, rfrag_lists)
+            v_forces = get_trans_rot_vecs2(
+                mfrag, runion.coords3d, runion.coords3d, AR, AR, m, rfrag_lists
+            )
+            # np.testing.assert_allclose(v_forces, forces)
+            w_forces = get_trans_rot_vecs2(
+                mfrag,
+                runion.coords3d,
+                punion.coords3d,
+                CR,
+                CP,
+                m,
+                pfrag_lists,
+                weight_func=weight_func,
+                skip=False,
+            )
+            # w_forces = np.zeros_like(w_forces)
+            print(f"norm(w_forces)={np.linalg.norm(w_forces):.4f}")
+            forces[mfrag] = v_forces + w_forces
+        norm = np.linalg.norm(forces)
+        step = forces
+        new_coords3d = runion.coords3d + step
+        print(f"{i:02d}: norm={norm:.4f}")
+        runion.coords3d =  new_coords3d
+
+    atoms = runion.atoms
+    coords_list = s4_coords
+    coords_to_trj("rs4.trj", atoms, coords_list)
 
 
 def run():
