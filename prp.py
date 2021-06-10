@@ -5,12 +5,63 @@ from functools import reduce
 
 import numpy as np
 
-from pysisyphus.calculators import HardSphere, TransTorque, Composite
+from pysisyphus.calculators import (
+    HardSphere,
+    TransTorque,
+    AtomAtomTransTorque,
+    Composite,
+)
 from pysisyphus.Geometry import Geometry
-from pysisyphus.helpers import geom_loader
+from pysisyphus.helpers import geom_loader, align_coords
 from pysisyphus.intcoords.setup import get_fragments, get_bond_sets
 from pysisyphus.xyzloader import coords_to_trj
 from pysisyphus.optimizers.SteepestDescent import SteepestDescent
+
+
+class SteepestDescent_:
+    def __init__(
+        self,
+        geom,
+        max_cycles=1000,
+        max_step=0.05,
+        rms_force=0.05,
+        rms_force_only=True,
+        prefix=None,
+        dump=False,
+    ):
+        self.geom = geom
+        self.max_cycles = max_cycles
+        self.max_step = max_step
+        self.rms_force = rms_force
+        self.rms_force_only = rms_force_only
+        self.prefix = prefix
+        self.dump = dump
+
+        self.all_coords = np.zeros((max_cycles, self.geom.coords.size))
+
+    def run(self):
+        coords = self.geom.coords.copy()
+
+        for i in range(self.max_cycles):
+            self.all_coords[i] = coords.copy()
+            results = self.geom.get_energy_and_forces_at(coords)
+            forces = results["forces"]
+            # forces = forces_getter(coords)
+            norm = np.linalg.norm(forces)
+            rms = np.sqrt(np.mean(forces ** 2))
+            if rms <= self.rms_force:
+                print(f"Converged in cycle {i}. Breaking.")
+                break
+            step = forces.copy()
+            step *= min(self.max_step / np.abs(step).max(), 1)
+            if i % 25 == 0:
+                print(
+                    f"{i:03d}: |forces|={norm: >12.6f} "
+                    f"rms(forces)={np.sqrt(np.mean(forces**2)): >12.6f} "
+                    f"|step|={np.linalg.norm(step): >12.6f}"
+                )
+            coords += step
+        self.all_coords = self.all_coords[: i + 1]
 
 
 def get_fragments_and_bonds(geoms):
@@ -160,6 +211,23 @@ def sd_opt(geom, forces_getter, max_cycles=1000, max_step=0.05, rms_thresh=0.05)
     return coords, all_coords[: i + 1]
 
 
+def get_steps_to_active_atom_mean(frag_lists, ind_dict, coords3d):
+    frag_num = len(frag_lists)
+    steps = np.zeros((frag_num, 3))
+    for m, frag_m in enumerate(frag_lists):
+        step_m = np.zeros(3)
+        for n, _ in enumerate(frag_lists):
+            if m == n:
+                continue
+            active_inds = ind_dict[(n, m)]
+            if len(active_inds) == 0:
+                continue
+            step_m += coords3d[active_inds].mean(axis=0)
+        step_m /= frag_num
+        steps[m] = step_m
+    return steps
+
+
 def precon_pos_orient(reactants, products):
     rfrags, rfrag_bonds, rbonds, runion = get_fragments_and_bonds(reactants)
     pfrags, pfrag_bonds, pbonds, punion = get_fragments_and_bonds(products)
@@ -244,6 +312,15 @@ def precon_pos_orient(reactants, products):
 
     G = form_G(rfrags, AR)
 
+    # Initial, centered, coordinates and 5 stages
+    r_coords = np.zeros((6, runion.coords.size))
+    p_coords = np.zeros((6, punion.coords.size))
+
+    def backup_coords(stage):
+        assert 0 <= stage < 6
+        r_coords[stage] = runion.coords.copy()
+        p_coords[stage] = punion.coords.copy()
+
     #########################################################
     # STAGE 1                                               #
     #                                                       #
@@ -253,22 +330,7 @@ def precon_pos_orient(reactants, products):
     # Center fragments at their geometric average
     center_fragments(rfrag_lists, runion)
     center_fragments(pfrag_lists, punion)
-
-    def get_steps_to_active_atom_mean(frag_lists, ind_dict, coords3d):
-        frag_num = len(frag_lists)
-        steps = np.zeros((frag_num, 3))
-        for m, frag_m in enumerate(frag_lists):
-            step_m = np.zeros(3)
-            for n, _ in enumerate(frag_lists):
-                if m == n:
-                    continue
-                active_inds = ind_dict[(n, m)]
-                if len(active_inds) == 0:
-                    continue
-                step_m += coords3d[active_inds].mean(axis=0)
-            step_m /= frag_num
-            steps[m] = step_m
-        return steps
+    backup_coords(0)
 
     # Translate reactant molecules
     alphas = get_steps_to_active_atom_mean(rfrag_lists, AR, runion.coords3d)
@@ -282,13 +344,15 @@ def precon_pos_orient(reactants, products):
     for pfrag, bsh in zip(pfrag_lists, bs_half):
         punion.coords3d[pfrag] += bsh
 
+    backup_coords(1)
+
     ##################################################
     # STAGE 2                                        #
     #                                                #
     # Intra-image Inter-molecular Hard-Sphere forces #
     ##################################################
 
-    def stage1_hard_sphere_opt(geom, frag_lists, prefix):
+    def stage2_hard_sphere_opt(geom, frag_lists, prefix):
         geom_ = geom.copy()
         calc = HardSphere(geom_, frag_lists)
         geom_.set_calculator(calc)
@@ -303,8 +367,10 @@ def precon_pos_orient(reactants, products):
 
         return geom_.coords3d
 
-    runion.coords3d = stage1_hard_sphere_opt(runion, rfrag_lists, "R")
-    punion.coords3d = stage1_hard_sphere_opt(punion, pfrag_lists, "P")
+    runion.coords3d = stage2_hard_sphere_opt(runion, rfrag_lists, "R")
+    punion.coords3d = stage2_hard_sphere_opt(punion, pfrag_lists, "P")
+
+    backup_coords(2)
 
     ####################################
     # STAGE 3                          #
@@ -327,8 +393,8 @@ def precon_pos_orient(reactants, products):
         rot_coords = (runion.coords3d[rfrag] - gm).dot(rot_mat)
         runion.coords3d[rfrag] = rot_coords + gm - rot_coords.mean(axis=0)
 
-    with open("rstage3.trj", "w") as handle:
-        handle.write("\n".join((rstage3_pre_rot, runion.as_xyz(), products.as_xyz())))
+    # with open("rstage3.trj", "w") as handle:
+    # handle.write("\n".join((rstage3_pre_rot, runion.as_xyz(), products.as_xyz())))
 
     Ns = [0] * len(pfrag_lists)
     for (m, n), CPmn in CP.items():
@@ -355,8 +421,10 @@ def precon_pos_orient(reactants, products):
         rot_coords = r0Pm.dot(rot_mat)
         punion.coords3d[pfrag] = rot_coords + gm - rot_coords.mean(axis=0)
 
-    with open("pstage3.trj", "w") as handle:
-        handle.write("\n".join((pstage3_pre_rot, punion.as_xyz(), products.as_xyz())))
+    # with open("pstage3.trj", "w") as handle:
+    # handle.write("\n".join((pstage3_pre_rot, punion.as_xyz(), products.as_xyz())))
+
+    backup_coords(3)
 
     """
     STAGE 4
@@ -387,10 +455,7 @@ def precon_pos_orient(reactants, products):
 
     def r_weight_func(m, n, a, b):
         """As required for (A5) in [1]."""
-        try:
-            return 1 if a in BR[(m, n)] else 0.5
-        except KeyError:
-            return 0.5
+        return 1 if a in BR[(m, n)] else 0.5
 
     vr_trans_torque = TransTorque(rfrag_lists, rfrag_lists, AR, AR)
     wr_trans_torque = TransTorque(
@@ -411,10 +476,7 @@ def precon_pos_orient(reactants, products):
 
     def p_weight_func(m, n, a, b):
         """As required for (A5) in [1]."""
-        try:
-            return 1 if a in BP[(m, n)] else 0.5
-        except KeyError:
-            return 0.5
+        return 1 if a in BP[(m, n)] else 0.5
 
     vp_trans_torque = TransTorque(pfrag_lists, pfrag_lists, AP, AP)
     wp_trans_torque = TransTorque(
@@ -432,43 +494,27 @@ def precon_pos_orient(reactants, products):
         "w": wp_trans_torque,
     }
     stage4_opt(punion, p_keys_calcs)
-    with open("pu_new.xyz", "w") as handle:
-        handle.write(punion.as_xyz())
-    import sys; sys.exit()
 
-    def p_forces_getter(coords):
-        forces = np.zeros_like(punion.coords3d)
-        for m, mfrag in enumerate(pfrag_lists):
-            coords3d = coords.reshape(-1, 3)
-            v_forces = get_trans_rot_vecs2(
-                mfrag, coords3d, coords3d, AP, AP, m, pfrag_lists
-            )
-            w_forces = get_trans_rot_vecs2(
-                mfrag,
-                coords3d,
-                runion.coords3d,
-                CP,
-                CR,
-                m,
-                rfrag_lists,
-                weight_func=p_weight_func,
-                skip=False,
-            )
-            # w_forces = np.zeros_like(v_forces)
-            hs_res = phs_calc.get_forces(punion.atoms, coords)
-            hs_forces = hs_res["forces"].reshape(-1, 3)
-            forces[mfrag] = v_forces + w_forces + hs_forces[mfrag]
-        return forces.flatten()
-
-    punion.coords, _ = sd_opt(punion, p_forces_getter)
-    with open("pu_ref.xyz", "w") as handle:
-        handle.write(punion.as_xyz())
-    coords_to_trj("ps4.trj", punion.atoms, _)
+    backup_coords(4)
 
     """
     STAGE 5
     Refinement of atomic positions using further hard-sphere forces.
     """
+
+    def s5_r_weight_func(m, n, a, b):
+        """As required for (A6) in [1]."""
+        return 1.5 if a in AR[(m, n)] else 2.0
+
+    raa = AtomAtomTransTorque(runion, rfrag_lists, AR)
+
+    def dump_stages(fn, atoms, coords_list):
+        align_coords(coords_list)
+        comments = [f"Stage {i}" for i in range(coords_list.shape[0])]
+        coords_to_trj(fn, atoms, coords_list, comments=comments)
+
+    dump_stages("r_coords.trj", runion.atoms, r_coords)
+    dump_stages("p_coords.trj", punion.atoms, p_coords)
 
 
 def run():
