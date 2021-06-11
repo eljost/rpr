@@ -15,10 +15,11 @@ from pysisyphus.Geometry import Geometry
 from pysisyphus.helpers import geom_loader, align_coords
 from pysisyphus.intcoords.setup import get_fragments, get_bond_sets
 from pysisyphus.xyzloader import coords_to_trj
-from pysisyphus.optimizers.SteepestDescent import SteepestDescent
+
+# from pysisyphus.optimizers.SteepestDescent import SteepestDescent
 
 
-class SteepestDescent_:
+class SteepestDescent:
     def __init__(
         self,
         geom,
@@ -61,6 +62,7 @@ class SteepestDescent_:
                     f"|step|={np.linalg.norm(step): >12.6f}"
                 )
             coords += step
+        self.geom.coords = coords
         self.all_coords = self.all_coords[: i + 1]
 
 
@@ -502,11 +504,12 @@ def precon_pos_orient(reactants, products):
     Refinement of atomic positions using further hard-sphere forces.
     """
 
-    def s5_r_weight_func(m, n, a, b):
-        """As required for (A6) in [1]."""
-        return 1.5 if a in AR[(m, n)] else 2.0
+    with open("rb5.xyz", "w") as handle:
+        handle.write(runion.as_xyz())
+    import pickle
 
-    raa = AtomAtomTransTorque(runion, rfrag_lists, AR)
+    with open("rb5", "wb") as handle:
+        pickle.dump((rfrag_lists, AR), handle)
 
     def dump_stages(fn, atoms, coords_list):
         align_coords(coords_list)
@@ -515,6 +518,21 @@ def precon_pos_orient(reactants, products):
 
     dump_stages("r_coords.trj", runion.atoms, r_coords)
     dump_stages("p_coords.trj", punion.atoms, p_coords)
+
+
+def stage5():
+    runion = geom_loader("rb5.xyz")
+    # runion.jmol()
+    import pickle
+
+    with open("rb5", "rb") as handle:
+        rfrag_lists, AR = pickle.load(handle)
+
+    raa = AtomAtomTransTorque(runion, rfrag_lists, AR)
+    zt, zr = raa.get_forces(runion.atoms, runion.coords)
+    ztr, zrr = raa.get_forces_naive(runion.atoms, runion.coords)
+    np.testing.assert_allclose(zt, ztr)
+    np.testing.assert_allclose(zr, zrr)
 
 
 def run():
@@ -531,4 +549,5 @@ def run():
 
 
 if __name__ == "__main__":
-    run()
+    # run()
+    stage5()
