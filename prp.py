@@ -2,6 +2,7 @@
 #     Habershon, 2021
 
 from functools import reduce
+from pprint import pprint
 
 import numpy as np
 
@@ -11,10 +12,11 @@ from pysisyphus.calculators import (
     AtomAtomTransTorque,
     Composite,
 )
+from pysisyphus.constants import BOHR2ANG
 from pysisyphus.Geometry import Geometry
 from pysisyphus.helpers import geom_loader, align_coords
 from pysisyphus.intcoords.setup import get_fragments, get_bond_sets
-from pysisyphus.xyzloader import coords_to_trj
+from pysisyphus.xyzloader import coords_to_trj, make_xyz_str
 
 # from pysisyphus.optimizers.SteepestDescent import SteepestDescent
 
@@ -29,6 +31,7 @@ class SteepestDescent:
         rms_force_only=True,
         prefix=None,
         dump=False,
+        print_mod=25,
     ):
         self.geom = geom
         self.max_cycles = max_cycles
@@ -37,6 +40,7 @@ class SteepestDescent:
         self.rms_force_only = rms_force_only
         self.prefix = prefix
         self.dump = dump
+        self.print_mod = print_mod
 
         self.all_coords = np.zeros((max_cycles, self.geom.coords.size))
 
@@ -55,7 +59,7 @@ class SteepestDescent:
                 break
             step = forces.copy()
             step *= min(self.max_step / np.abs(step).max(), 1)
-            if i % 25 == 0:
+            if i % self.print_mod == 0:
                 print(
                     f"{i:03d}: |forces|={norm: >12.6f} "
                     f"rms(forces)={np.sqrt(np.mean(forces**2)): >12.6f} "
@@ -230,6 +234,43 @@ def get_steps_to_active_atom_mean(frag_lists, ind_dict, coords3d):
     return steps
 
 
+def report_frags(rgeom, pgeom, rfrags, pfrags, rbond_diff, pbond_diff):
+    for name, geom in (("Reactant(s)", rgeom), ("Product(s)", pgeom)):
+        print(f"{name}: {geom}\n\n{geom.as_xyz()}\n")
+
+    atoms = rgeom.atoms
+
+    def get_frag_atoms(geom, frag):
+        atoms = geom.atoms
+        return [atoms[i] for i in frag]
+
+    for name, geom, frags in (("reactant", rgeom, rfrags), ("product", pgeom, pfrags)):
+        print(f"{len(frags)} fragment(s) in {name} image\n")
+        for frag in frags:
+            frag_atoms = get_frag_atoms(geom, frag)
+            frag_coords = geom.coords3d[list(frag)]
+            frag_xyz = make_xyz_str(frag_atoms, frag_coords * BOHR2ANG)
+            print(frag_xyz + "\n")
+
+    def print_bonds(geom, bonds):
+        for from_, to_ in bonds:
+            from_atom, to_atom = [geom.atoms[i] for i in (from_, to_)]
+            print(f"\t({from_: >3d}{from_atom} - {to_: >3d}{to_atom})")
+
+    print("Bonds broken in reactant image:")
+    print_bonds(rgeom, rbond_diff)
+    print()
+    print("Bonds formed in product image:")
+    print_bonds(pgeom, pbond_diff)
+    print()
+
+
+def report_mats(name, mats):
+    for (m, n), indices in mats.items():
+        print(f"{name}({m}, {n}): {indices}")
+    print()
+
+
 def precon_pos_orient(reactants, products):
     rfrags, rfrag_bonds, rbonds, runion = get_fragments_and_bonds(reactants)
     pfrags, pfrag_bonds, pbonds, punion = get_fragments_and_bonds(products)
@@ -255,6 +296,8 @@ def precon_pos_orient(reactants, products):
     pbond_diff = pbonds - rbonds  # Present in product(s)
     rbond_diff = rbonds - pbonds  # Present in reactant(s)
 
+    report_frags(runion, punion, rfrags, pfrags, rbond_diff, pbond_diff)
+
     def form_C(m_frags, n_frags):
         """Construct the C-matrices.
 
@@ -269,6 +312,10 @@ def precon_pos_orient(reactants, products):
 
     CR = form_C(rfrags, pfrags)
     CP = {(n, m): union for (m, n), union in CR.items()}
+    print("CR(m, n), subset of atoms in molecule Rn which are in Pm after reaction.")
+    report_mats("CR", CR)
+    print("CP(m, n), subset of atoms in molecule Pn which are in Rm before reaction.")
+    report_mats("CP", CP)
 
     def form_B(C, bonds_formed):
         """Construct the B-matrices.
@@ -286,6 +333,10 @@ def precon_pos_orient(reactants, products):
 
     BR = form_B(CR, pbond_diff)
     BP = {(n, m): intersection for (m, n), intersection in BR.items()}
+    print("BR(m, n), subset of atoms in CRnm actually involved in bond forming/breaking.")
+    report_mats("BR", BR)
+    print("BP(m, n), subset of atoms in CPnm actually involved in bond forming/breaking.")
+    report_mats("BP", BP)
 
     def form_A(frags, which_frag, formed_bonds):
         """Construct the A-matrices.
@@ -302,6 +353,10 @@ def precon_pos_orient(reactants, products):
 
     AR = form_A(rfrags, which_rfrag, pbond_diff)
     AP = form_A(pfrags, which_pfrag, rbond_diff)
+    print(f"AR(m, n), subset of atoms in Rm that form bonds to atoms in Rn.")
+    report_mats("AR", AR)
+    print("AP(m, n), subset of atoms in Pm which had bonds with Pn (formerly bonded in R).")
+    report_mats("AP", AP)
 
     def form_G(frags, A):
         G = dict()
@@ -313,6 +368,9 @@ def precon_pos_orient(reactants, products):
         return G
 
     G = form_G(rfrags, AR)
+    print(f"G: {G}")
+
+    import sys; sys.exit()
 
     # Initial, centered, coordinates and 5 stages
     r_coords = np.zeros((6, runion.coords.size))
@@ -403,7 +461,6 @@ def precon_pos_orient(reactants, products):
         Ns[m] += len(CPmn)
 
     # Rotate P fragments
-    pstage3_pre_rot = punion.as_xyz()
     for m, pfrag in enumerate(pfrag_lists):
         pc3d = punion.coords3d[pfrag]
         gm = pc3d.mean(axis=0)
@@ -504,6 +561,48 @@ def precon_pos_orient(reactants, products):
     Refinement of atomic positions using further hard-sphere forces.
     """
 
+    def stage5_opt(geom, keys_calcs):
+        # calc = Composite("hardsphere + v + w + z", keys_calcs=keys_calcs)
+        # Hardsphere between molecules that do not interact is missing
+        calc = Composite("v + w + z", keys_calcs=keys_calcs)
+        geom.set_calculator(calc)
+        opt_kwargs = {
+            "max_step": 0.05,
+            "max_cycles": 1000,
+            "rms_force": 0.05,
+            "rms_force_only": True,
+            "dump": True,
+            "print_mod": 5,
+        }
+        opt = SteepestDescent(geom, **opt_kwargs)
+        opt.run()
+
+    def r_weight_func(m, n, a, b):
+        """As required for (A5) in [1]."""
+        return 1 if a in BR[(m, n)] else 0.5
+
+    vr_trans_torque = TransTorque(rfrag_lists, rfrag_lists, AR, AR, kappa=1.0)
+    wr_trans_torque = TransTorque(
+        rfrag_lists,
+        pfrag_lists,
+        CR,
+        CP,
+        weight_func=r_weight_func,
+        skip=False,
+        b_coords3d=punion.coords3d,
+        kappa=3.0,
+    )
+    zr_aa_trans_torque = AtomAtomTransTorque(runion, rfrag_lists, AR)
+    r_keys_calcs = {
+        # "hardsphere": HardSphere(runion, rfrag_lists, kappa=50),
+        "v": vr_trans_torque,
+        "w": wr_trans_torque,
+        "z": zr_aa_trans_torque,
+    }
+    stage5_opt(runion, r_keys_calcs)
+
+    backup_coords(5)
+
     with open("rb5.xyz", "w") as handle:
         handle.write(runion.as_xyz())
     import pickle
@@ -522,17 +621,38 @@ def precon_pos_orient(reactants, products):
 
 def stage5():
     runion = geom_loader("rb5.xyz")
-    # runion.jmol()
     import pickle
 
     with open("rb5", "rb") as handle:
         rfrag_lists, AR = pickle.load(handle)
 
     raa = AtomAtomTransTorque(runion, rfrag_lists, AR)
-    zt, zr = raa.get_forces(runion.atoms, runion.coords)
-    ztr, zrr = raa.get_forces_naive(runion.atoms, runion.coords)
-    np.testing.assert_allclose(zt, ztr)
-    np.testing.assert_allclose(zr, zrr)
+    res = raa.get_forces(runion.atoms, runion.coords)
+    forces = res["forces"]
+
+
+def stage5_comp():
+    runion = geom_loader("stage5comp.xyz")
+    # runion.jmol()
+
+    rfrag_lists = ([0, 1], [2, 3])
+    AR = {
+        (0, 1): [1],
+        (1, 0): [2],
+    }
+
+    raa = AtomAtomTransTorque(runion, rfrag_lists, AR)
+    # zt, zr = raa.get_forces(runion.atoms, runion.coords)
+    # ztr, zrr = raa.get_forces_naive(runion.atoms, runion.coords)
+    # np.testing.assert_allclose(zt, ztr)
+    # np.testing.assert_allclose(zr, zrr)
+    # print("MATCH!")
+    # print("zt", zt)
+    # print("zr", zr)
+    res = raa.get_forces(runion.atoms, runion.coords)
+    res_ref = raa.get_forces_naive(runion.atoms, runion.coords)
+    np.testing.assert_allclose(res["forces"], res_ref["forces"])
+    print("MATCH!")
 
 
 def run():
@@ -549,5 +669,6 @@ def run():
 
 
 if __name__ == "__main__":
-    # run()
-    stage5()
+    run()
+    # stage5()
+    # stage5_comp()
